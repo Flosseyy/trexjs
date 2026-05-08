@@ -7,6 +7,6 @@
     "start": "node bot.js"
   },
   "dependencies": {
-    "trexjs": "latest"
+    "trexjs": "flosseyy/trexjs"
   }
 }
