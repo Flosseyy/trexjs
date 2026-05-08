@@ -1,0 +1,41 @@
+[
+  {
+    "name": "hello-rule",
+    "when": "message",
+    "if": { "equals": "!hello" },
+    "then": [{ "action": "reply", "text": "Hello! 👋" }]
+  },
+  {
+    "name": "ping-pong",
+    "when": "message",
+    "if": { "equals": "!ping" },
+    "then": [{ "action": "reply", "text": "Pong! 🏓" }]
+  },
+  {
+    "name": "spam-guard",
+    "when": "message",
+    "if": { "isSpam": true },
+    "then": [
+      { "action": "deleteMessage" },
+      { "action": "warnUser", "reason": "Spam detected" }
+    ]
+  },
+  {
+    "name": "welcome-member",
+    "when": "memberJoin",
+    "if": {},
+    "then": [
+      { "action": "addRole", "role": "Member" },
+      { "action": "sendMessage", "text": "Welcome to the server! 🎉" }
+    ]
+  },
+  {
+    "name": "ban-slur",
+    "when": "message",
+    "if": { "contains": "badword" },
+    "then": [
+      { "action": "deleteMessage" },
+      { "action": "dmUser", "text": "Your message was removed for violating server rules." }
+    ]
+  }
+]

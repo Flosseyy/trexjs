@@ -1,0 +1,8 @@
+examples/
+tests/
+data/
+{src/
+scripts/
+.env
+*.log
+logs/

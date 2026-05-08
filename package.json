@@ -1,0 +1,41 @@
+{
+  "name": "trexjs",
+  "version": "0.1.0",
+  "description": "Workflow-based Discord bot automation framework. WHEN event → IF condition → THEN action.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./plugins/moderation": "./plugins/moderation.js",
+    "./persistence/mongo": "./src/persistence/MongoStorage.js"
+  },
+  "bin": {
+    "trex": "./cli/index.js"
+  },
+  "files": [
+    "src/",
+    "cli/",
+    "plugins/",
+    "template/",
+    "README.md"
+  ],
+  "scripts": {
+    "prepublishOnly": "node scripts/verify.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "inquirer": "^9.2.12",
+    "chalk": "^5.3.0",
+    "winston": "^3.11.0",
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["discord", "bot", "automation", "workflow", "trex"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourname/trexjs"
+  }
+}
