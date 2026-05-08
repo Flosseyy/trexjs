@@ -1,318 +1,481 @@
 #!/usr/bin/env node
 /**
- * Trex CLI — ships inside the trexjs npm package
+ * Trex.js v2 CLI
  *
- * After: npm install -g trexjs
- * Users can run: trex init, trex add rule, trex list, trex test, trex dev
- *
- * trex init copies the bundled template/ folder into the user's new project.
- * No separate download or file needed.
+ * Usage:
+ *   trex create my-bot       → scaffold a new bot project (prompts for JS or TS)
+ *   trex add command <name>  → add a new command file
+ *   trex add event <name>    → add a new event file
+ *   trex add precondition <name>  → add a new precondition file
+ *   trex sync [guildId]      → sync slash commands with Discord
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, unlinkSync } from 'fs';
-import { execSync } from 'child_process';
-import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import path from 'path';
-import chalk from 'chalk';
-import inquirer from 'inquirer';
+import { mkdir, writeFile, readFile, copyFile } from 'fs/promises';
+import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Template folder lives INSIDE the trexjs package at ../template relative to cli/
-const TEMPLATE_DIR = path.join(__dirname, '..', 'template');
+// Dynamically import chalk and inquirer (ESM-only)
+const { default: chalk } = await import('chalk');
+const { default: inquirer } = await import('inquirer');
 
-const TRIGGERS = ['message', 'memberJoin', 'reaction', 'interaction'];
-const CONDITIONS = ['equals', 'contains', 'startsWith', 'hasRole', 'inChannel', 'isSpam', '(none — always run)'];
-const ACTIONS = ['reply', 'sendMessage', 'deleteMessage', 'addRole', 'removeRole', 'timeoutUser', 'dmUser', 'warnUser'];
+const [,, command, ...args] = process.argv;
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+switch (command) {
+  case 'create': await cmdCreate(args[0]); break;
+  case 'add':    await cmdAdd(args[0], args[1]); break;
+  case 'sync':   await cmdSync(args[0]); break;
+  default:
+    console.log(chalk.cyan(`
+  🦖 Trex.js v2
 
-function getRulesPath() {
-  return path.join(process.cwd(), 'data', 'global-rules.json');
+  ${chalk.bold('Commands:')}
+    trex create <name>              Create a new bot project
+    trex add command <name>         Add a command file
+    trex add event <name>           Add an event file
+    trex add precondition <name>    Add a precondition file
+    trex sync [guildId]             Sync slash commands with Discord
+`));
 }
 
-function loadRules() {
-  const p = getRulesPath();
-  if (!existsSync(p)) return [];
-  return JSON.parse(readFileSync(p, 'utf-8'));
-}
+// ─── trex create ─────────────────────────────────────────────────────────────
 
-function saveRules(rules) {
-  const dir = path.join(process.cwd(), 'data');
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(getRulesPath(), JSON.stringify(rules, null, 2));
-}
-
-function banner() {
-  console.log(chalk.cyan('\n  🦖 Trex.js — Discord Bot Framework\n'));
-}
-
-// ─── trex init ───────────────────────────────────────────────────────────────
-
-async function cmdInit() {
-  banner();
-
-  const args = process.argv.slice(3); // trex init [name]
-  let botName = args[0];
-
-  if (!botName) {
-    const answer = await inquirer.prompt([
-      { name: 'botName', message: 'Project name:', default: 'my-trex-bot' },
-    ]);
-    botName = answer.botName;
-  }
-
-  const targetDir = path.join(process.cwd(), botName);
-
-  if (existsSync(targetDir)) {
-    console.log(chalk.red(`\n  ❌ Directory "${botName}" already exists.\n`));
+async function cmdCreate(name) {
+  if (!name) {
+    console.error(chalk.red('Usage: trex create <project-name>'));
     process.exit(1);
   }
 
-  const { token } = await inquirer.prompt([
+  const { lang } = await inquirer.prompt([
     {
-      name: 'token',
-      message: 'Discord bot token (you can set this later in .env):',
-      default: '',
+      type: 'list',
+      name: 'lang',
+      message: 'Which language do you want to use?',
+      choices: [
+        { name: 'JavaScript', value: 'js' },
+        { name: 'TypeScript', value: 'ts' },
+      ],
     },
   ]);
 
-  console.log(chalk.gray('\n  Scaffolding project...'));
+  const { storage } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'storage',
+      message: 'Storage backend:',
+      choices: [
+        { name: 'JSON files (simple)', value: 'json' },
+        { name: 'MongoDB',             value: 'mongo' },
+      ],
+    },
+  ]);
 
-  // Copy the bundled template into the new project folder
-  cpSync(TEMPLATE_DIR, targetDir, { recursive: true });
+  const { features } = await inquirer.prompt([
+    {
+      type: 'checkbox',
+      name: 'features',
+      message: 'Which features do you want included?',
+      choices: [
+        { name: 'Moderation plugin', value: 'moderation', checked: true },
+        { name: 'Voice audio',       value: 'voice' },
+        { name: 'Pagination helper', value: 'pagination', checked: true },
+        { name: 'i18n support',      value: 'i18n' },
+        { name: 'Hot reload (dev)',   value: 'hotReload', checked: true },
+      ],
+    },
+  ]);
 
-  // Rename .env.example → .env and inject token
-  const envSrc = path.join(targetDir, '.env.example');
-  const envDest = path.join(targetDir, '.env');
-  if (existsSync(envSrc)) {
-    const envContent = readFileSync(envSrc, 'utf-8')
-      .replace('your_token_here', token || 'your_token_here');
-    writeFileSync(envDest, envContent);
-    unlinkSync(envSrc);
+  const dir = path.resolve(process.cwd(), name);
+  if (existsSync(dir)) {
+    console.error(chalk.red(`Directory "${name}" already exists.`));
+    process.exit(1);
   }
 
-  // Replace {{BOT_NAME}} in template package.json
-  const pkgPath = path.join(targetDir, 'package.json');
-  const pkg = readFileSync(pkgPath, 'utf-8').replace('{{BOT_NAME}}', botName);
-  writeFileSync(pkgPath, pkg);
+  console.log(chalk.cyan(`\nScaffolding ${chalk.bold(name)} (${lang.toUpperCase()})...\n`));
 
-  // Install dependencies
-  console.log(chalk.gray('  Installing dependencies...\n'));
+  const ext = lang; // 'js' or 'ts'
+
+  // Create directory structure
+  const dirs = [
+    dir,
+    `${dir}/src/commands`,
+    `${dir}/src/events`,
+    `${dir}/src/preconditions`,
+    `${dir}/src/plugins`,
+    `${dir}/data`,
+  ];
+
+  if (features.includes('i18n')) dirs.push(`${dir}/locales`);
+
+  for (const d of dirs) await mkdir(d, { recursive: true });
+
+  // ── package.json ──
+  const pkg = {
+    name,
+    version: '1.0.0',
+    type: 'module',
+    scripts: {
+      start: lang === 'ts' ? 'node --loader ts-node/esm src/bot.ts' : 'node src/bot.js',
+      dev:   lang === 'ts' ? 'node --watch --loader ts-node/esm src/bot.ts' : 'node --watch src/bot.js',
+    },
+    dependencies: {
+      trexjs: '^2.0.0',
+      dotenv: '^16.3.1',
+      ...(storage === 'mongo' ? { mongoose: '^8.0.0' } : {}),
+    },
+    ...(lang === 'ts' ? {
+      devDependencies: {
+        typescript: '^5.3.0',
+        'ts-node': '^10.9.2',
+        '@types/node': '^20.0.0',
+      },
+    } : {}),
+  };
+
+  await writeFile(`${dir}/package.json`, JSON.stringify(pkg, null, 2));
+
+  // ── .env ──
+  await writeFile(`${dir}/.env`, [
+    `DISCORD_TOKEN=your_token_here`,
+    `CLIENT_ID=your_client_id_here`,
+    storage === 'mongo' ? 'MONGO_URI=mongodb://localhost:27017/mybot' : '',
+  ].filter(Boolean).join('\n'));
+
+  // ── .gitignore ──
+  await writeFile(`${dir}/.gitignore`, 'node_modules\n.env\ndata/\ndist/\n');
+
+  // ── tsconfig.json (TypeScript only) ──
+  if (lang === 'ts') {
+    await writeFile(`${dir}/tsconfig.json`, JSON.stringify({
+      compilerOptions: {
+        target: 'ES2022',
+        module: 'ES2022',
+        moduleResolution: 'bundler',
+        strict: true,
+        esModuleInterop: true,
+        skipLibCheck: true,
+        outDir: './dist',
+      },
+      include: ['src/**/*'],
+    }, null, 2));
+  }
+
+  // ── Main bot file ──
+  const storageImport = storage === 'mongo'
+    ? `import { MongoStorage } from 'trexjs/persistence/mongo';\nconst storage = new MongoStorage(process.env.MONGO_URI);`
+    : `import { JsonStorage } from 'trexjs';\nconst storage = new JsonStorage('./data');`;
+
+  const botFile = lang === 'ts'
+    ? generateBotFileTs(features, storageImport, storage)
+    : generateBotFileJs(features, storageImport, storage);
+
+  await writeFile(`${dir}/src/bot.${ext}`, botFile);
+
+  // ── Example command ──
+  await writeFile(
+    `${dir}/src/commands/ping.${ext}`,
+    generateCommandFile(lang)
+  );
+
+  // ── Example event ──
+  await writeFile(
+    `${dir}/src/events/ready.${ext}`,
+    generateEventFile(lang)
+  );
+
+  // ── Example precondition ──
+  await writeFile(
+    `${dir}/src/preconditions/GuildOnly.${ext}`,
+    generatePreconditionFile(lang)
+  );
+
+  // ── i18n locale ──
+  if (features.includes('i18n')) {
+    await writeFile(`${dir}/locales/en-US.${ext}`, generateLocaleFile(lang));
+  }
+
+  // ── README ──
+  await writeFile(`${dir}/README.md`, generateReadme(name, lang, features));
+
+  console.log(chalk.green('✅  Project created!\n'));
+  console.log(`  ${chalk.bold('Next steps:')}`);
+  console.log(`  ${chalk.cyan('cd')} ${name}`);
+  console.log(`  ${chalk.cyan('npm install')}`);
+  console.log(`  ${chalk.cyan('# Edit .env with your Discord token')}`);
+  console.log(`  ${chalk.cyan('npm run dev')}\n`);
+}
+
+// ─── trex add ────────────────────────────────────────────────────────────────
+
+async function cmdAdd(type, name) {
+  if (!type || !name) {
+    console.error(chalk.red('Usage: trex add <command|event|precondition> <name>'));
+    process.exit(1);
+  }
+
+  // Detect language from tsconfig presence
+  const lang = existsSync('./tsconfig.json') ? 'ts' : 'js';
+  const ext  = lang;
+
+  const targets = {
+    command:      { dir: './src/commands',      gen: generateCommandFile },
+    event:        { dir: './src/events',        gen: generateEventFile },
+    precondition: { dir: './src/preconditions', gen: generatePreconditionFile },
+  };
+
+  const target = targets[type];
+  if (!target) {
+    console.error(chalk.red(`Unknown type: ${type}. Use command, event, or precondition.`));
+    process.exit(1);
+  }
+
+  const fileName = `${name}.${ext}`;
+  const filePath = path.join(target.dir, fileName);
+
+  if (existsSync(filePath)) {
+    console.error(chalk.red(`File already exists: ${filePath}`));
+    process.exit(1);
+  }
+
+  if (!existsSync(target.dir)) await mkdir(target.dir, { recursive: true });
+
+  await writeFile(filePath, target.gen(lang, name));
+  console.log(chalk.green(`✅  Created: ${filePath}`));
+}
+
+// ─── trex sync ───────────────────────────────────────────────────────────────
+
+async function cmdSync(guildId) {
+  console.log(chalk.cyan('Syncing slash commands...'));
   try {
-    execSync('npm install', { cwd: targetDir, stdio: 'inherit' });
-  } catch {
-    console.log(chalk.yellow('\n  npm install failed — run it manually inside the project.'));
+    const { default: bot } = await import(path.resolve('./src/bot.js'));
+    await bot.syncCommands(guildId);
+    console.log(chalk.green('✅  Commands synced!'));
+  } catch (err) {
+    console.error(chalk.red(`Sync failed: ${err.message}`));
+    process.exit(1);
   }
-
-  console.log(chalk.green(`\n  ✅ Created ${botName}!\n`));
-  console.log(chalk.white('  Next steps:\n'));
-  console.log(chalk.cyan(`    cd ${botName}`));
-  if (!token) console.log(chalk.cyan(`    # edit .env and add your DISCORD_TOKEN`));
-  console.log(chalk.cyan(`    npm run dev\n`));
-  console.log(chalk.gray('  Add rules:   trex add rule'));
-  console.log(chalk.gray('  List rules:  trex list\n'));
 }
 
-// ─── trex add rule ───────────────────────────────────────────────────────────
+// ─── Template generators ─────────────────────────────────────────────────────
 
-async function cmdAddRule() {
-  banner();
-  console.log(chalk.white('  Add a new rule\n'));
+function generateBotFileJs(features, storageImport, storage) {
+  return `import { createTrex } from 'trexjs';
+${storageImport}
+${features.includes('moderation') ? "import { moderationPlugin } from 'trexjs/plugins/moderation';" : ''}
 
-  const { trigger } = await inquirer.prompt([
-    { type: 'list', name: 'trigger', message: 'WHEN (trigger event):', choices: TRIGGERS },
-  ]);
+const bot = createTrex({
+  storage,
+  commandsDir:      './src/commands',
+  eventsDir:        './src/events',
+  preconditionsDir: './src/preconditions',
+  hotReload:        process.env.NODE_ENV !== 'production',
+  ${features.includes('i18n') ? "localesDir: './locales'," : ''}
+});
 
-  const { conditionType } = await inquirer.prompt([
-    { type: 'list', name: 'conditionType', message: 'IF (condition):', choices: CONDITIONS },
-  ]);
+${features.includes('moderation') ? 'bot.use(moderationPlugin);' : ''}
 
-  let ifBlock = {};
-  if (!conditionType.startsWith('(none')) {
-    const { conditionValue } = await inquirer.prompt([
-      { name: 'conditionValue', message: `Value for "${conditionType}":` },
-    ]);
-    ifBlock = { [conditionType]: conditionValue };
+await bot.start();
+
+export default bot;
+`;
+}
+
+function generateBotFileTs(features, storageImport, storage) {
+  return `import { createTrex, TrexEngine } from 'trexjs';
+${storageImport}
+${features.includes('moderation') ? "import { moderationPlugin } from 'trexjs/plugins/moderation';" : ''}
+
+const bot: TrexEngine = createTrex({
+  storage,
+  commandsDir:      './src/commands',
+  eventsDir:        './src/events',
+  preconditionsDir: './src/preconditions',
+  hotReload:        process.env.NODE_ENV !== 'production',
+  ${features.includes('i18n') ? "localesDir: './locales'," : ''}
+});
+
+${features.includes('moderation') ? 'bot.use(moderationPlugin);' : ''}
+
+await bot.start();
+
+export default bot;
+`;
+}
+
+function generateCommandFile(lang, name = 'ping') {
+  const cmdName = name.toLowerCase();
+
+  if (lang === 'ts') {
+    return `import { SlashCommandBuilder } from 'discord.js';
+import type { TrexCommand, CommandContext } from 'trexjs';
+
+const command: TrexCommand = {
+  data: new SlashCommandBuilder()
+    .setName('${cmdName}')
+    .setDescription('Replies with Pong!'),
+
+  // preconditions: ['GuildOnly'],  // Uncomment to enable
+  // cooldown: 5000,                // 5 second cooldown
+  // cooldownScope: 'user',
+  // requiredPermissions: ['SendMessages'],
+
+  async run({ interaction, t }: CommandContext): Promise<void> {
+    await interaction.reply('🏓 Pong!');
+  },
+};
+
+export default command;
+`;
   }
 
-  const actions = [];
-  let addMore = true;
+  return `import { SlashCommandBuilder } from 'discord.js';
 
-  while (addMore) {
-    const { actionType } = await inquirer.prompt([
-      { type: 'list', name: 'actionType', message: 'THEN (action):', choices: ACTIONS },
-    ]);
+/** @type {import('trexjs').TrexCommand} */
+const command = {
+  data: new SlashCommandBuilder()
+    .setName('${cmdName}')
+    .setDescription('Replies with Pong!'),
 
-    const actionConfig = { action: actionType };
+  // preconditions: ['GuildOnly'],  // Uncomment to enable
+  // cooldown: 5000,                // 5 second cooldown
+  // cooldownScope: 'user',
+  // requiredPermissions: ['SendMessages'],
 
-    if (['reply', 'sendMessage', 'dmUser'].includes(actionType)) {
-      const { text } = await inquirer.prompt([{ name: 'text', message: 'Response text:' }]);
-      actionConfig.text = text;
-    } else if (['addRole', 'removeRole'].includes(actionType)) {
-      const { role } = await inquirer.prompt([{ name: 'role', message: 'Role name:' }]);
-      actionConfig.role = role;
-    } else if (actionType === 'timeoutUser') {
-      const { duration } = await inquirer.prompt([
-        { name: 'duration', message: 'Timeout duration (seconds):', default: '60' },
-      ]);
-      actionConfig.duration = parseInt(duration) * 1000;
+  async run({ interaction, t }) {
+    await interaction.reply('🏓 Pong!');
+  },
+};
+
+export default command;
+`;
+}
+
+function generateEventFile(lang, name = 'ready') {
+  if (lang === 'ts') {
+    return `import type { TrexEvent } from 'trexjs';
+import { Client } from 'discord.js';
+
+const event: TrexEvent<Client> = {
+  name: 'ready',
+  event: 'ready',
+  once: true,
+
+  async run({ data: client }): Promise<void> {
+    console.log(\`✅ Logged in as \${client.user?.tag}\`);
+  },
+};
+
+export default event;
+`;
+  }
+
+  return `/** @type {import('trexjs').TrexEvent} */
+const event = {
+  name: 'ready',
+  event: 'ready',
+  once: true,
+
+  async run({ data: client }) {
+    console.log(\`✅ Logged in as \${client.user?.tag}\`);
+  },
+};
+
+export default event;
+`;
+}
+
+function generatePreconditionFile(lang, name = 'GuildOnly') {
+  if (lang === 'ts') {
+    return `import type { TrexPrecondition, CommandContext } from 'trexjs';
+
+const precondition: TrexPrecondition = {
+  name: '${name}',
+
+  run({ interaction }: CommandContext): boolean | string {
+    if (!interaction.inGuild()) {
+      return '❌ This command can only be used in a server.';
     }
+    return true;
+  },
+};
 
-    actions.push(actionConfig);
-
-    const { more } = await inquirer.prompt([
-      { type: 'confirm', name: 'more', message: 'Add another action to this rule?', default: false },
-    ]);
-    addMore = more;
+export default precondition;
+`;
   }
 
-  const { ruleName } = await inquirer.prompt([
-    { name: 'ruleName', message: 'Rule name:', default: `${trigger}-rule` },
-  ]);
+  return `/** @type {import('trexjs').TrexPrecondition} */
+const precondition = {
+  name: '${name}',
 
-  const rule = { name: ruleName, when: trigger, if: ifBlock, then: actions };
-  const rules = loadRules();
-  rules.push(rule);
-  saveRules(rules);
+  run({ interaction }) {
+    if (!interaction.inGuild()) {
+      return '❌ This command can only be used in a server.';
+    }
+    return true;
+  },
+};
 
-  console.log(chalk.green('\n  ✅ Rule saved:\n'));
-  console.log(chalk.gray(JSON.stringify(rule, null, 2)));
-  console.log();
+export default precondition;
+`;
 }
 
-// ─── trex list ───────────────────────────────────────────────────────────────
+function generateLocaleFile(lang) {
+  const content = {
+    'errors.missingPermissions': 'You are missing the required permissions.',
+    'errors.onCooldown': 'Please wait {seconds}s before using this command again.',
+    'errors.preconditionFailed': 'You cannot use this command here.',
+  };
 
-function cmdList() {
-  const rules = loadRules();
-
-  if (rules.length === 0) {
-    console.log(chalk.yellow('\n  No rules yet. Run: trex add rule\n'));
-    return;
+  if (lang === 'ts') {
+    return `const strings: Record<string, string> = ${JSON.stringify(content, null, 2)};
+export default strings;
+`;
   }
 
-  banner();
-  console.log(chalk.white(`  ${rules.length} rule(s):\n`));
-
-  rules.forEach((r, i) => {
-    const cond = Object.entries(r.if ?? {})
-      .map(([k, v]) => `${k}: "${v}"`)
-      .join(', ') || 'always';
-    const acts = r.then.map(a => a.action).join(', ');
-
-    console.log(`  ${chalk.bold(`${i + 1}. ${r.name ?? r.when}`)}`);
-    console.log(chalk.gray(`     WHEN ${r.when}  •  IF ${cond}  •  THEN ${acts}\n`));
-  });
+  return `export default ${JSON.stringify(content, null, 2)};
+`;
 }
 
-// ─── trex test ───────────────────────────────────────────────────────────────
+function generateReadme(name, lang, features) {
+  return `# ${name}
 
-async function cmdTest() {
-  const rules = loadRules();
-  if (rules.length === 0) {
-    console.log(chalk.yellow('\n  No rules to test.\n'));
-    return;
-  }
+A Discord bot built with [Trex.js v2](https://github.com/yourname/trexjs).
 
-  banner();
+## Stack
+- Language: **${lang.toUpperCase()}**
+- Features: ${features.join(', ')}
 
-  const { ruleName } = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'ruleName',
-      message: 'Pick a rule to test:',
-      choices: rules.map(r => r.name ?? r.when),
-    },
-  ]);
+## Structure
 
-  const rule = rules.find(r => (r.name ?? r.when) === ruleName);
+\`\`\`
+src/
+  bot.${lang}               ← Entry point
+  commands/              ← Slash commands (auto-discovered)
+    ping.${lang}
+  events/                ← Discord events (auto-discovered)
+    ready.${lang}
+  preconditions/         ← Command guards (auto-discovered)
+    GuildOnly.${lang}
+  plugins/               ← Custom plugins
+\`\`\`
 
-  const { input } = await inquirer.prompt([
-    { name: 'input', message: 'Simulate message content:' },
-  ]);
+## Adding a command
 
-  const ifBlock = rule.if ?? {};
-  let matched = true;
+\`\`\`bash
+npx trex add command mycommand
+\`\`\`
 
-  for (const [cond, val] of Object.entries(ifBlock)) {
-    const content = input.toLowerCase();
-    const v = String(val).toLowerCase();
-    if (cond === 'equals')     matched = content === v;
-    else if (cond === 'contains')    matched = content.includes(v);
-    else if (cond === 'startsWith')  matched = content.startsWith(v);
-    else if (cond === 'endsWith')    matched = content.endsWith(v);
-    if (!matched) break;
-  }
+This creates \`src/commands/mycommand.${lang}\` — just fill in the handler.
 
-  console.log(chalk.cyan(`\n  Test: "${ruleName}"`));
-  console.log(`  Input:  "${input}"`);
-  console.log(`  Result: ${matched ? chalk.green('✅ MATCHED') : chalk.red('❌ NO MATCH')}`);
-  if (matched) {
-    console.log(`  Would run: ${chalk.bold(rule.then.map(a => a.action).join(' → '))}`);
-    rule.then.forEach(a => {
-      if (a.text) console.log(chalk.gray(`    → "${a.text}"`));
-    });
-  }
-  console.log();
-}
+## Running
 
-// ─── trex remove ─────────────────────────────────────────────────────────────
-
-async function cmdRemove() {
-  const rules = loadRules();
-  if (rules.length === 0) {
-    console.log(chalk.yellow('\n  No rules to remove.\n'));
-    return;
-  }
-
-  const { ruleName } = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'ruleName',
-      message: 'Which rule to remove?',
-      choices: rules.map(r => r.name ?? r.when),
-    },
-  ]);
-
-  const { confirm } = await inquirer.prompt([
-    { type: 'confirm', name: 'confirm', message: `Delete "${ruleName}"?`, default: false },
-  ]);
-
-  if (!confirm) { console.log(chalk.gray('  Cancelled.\n')); return; }
-
-  const updated = rules.filter(r => (r.name ?? r.when) !== ruleName);
-  saveRules(updated);
-  console.log(chalk.green(`\n  ✅ Removed "${ruleName}"\n`));
-}
-
-// ─── Router ──────────────────────────────────────────────────────────────────
-
-const [,, command, sub] = process.argv;
-
-switch (command) {
-  case 'init':   await cmdInit();    break;
-  case 'dev':
-    console.log(chalk.cyan('\n  🦖 Starting bot...\n'));
-    execSync('node bot.js', { stdio: 'inherit' });
-    break;
-  case 'add':
-    if (sub === 'rule') await cmdAddRule();
-    else console.log(chalk.red('  Usage: trex add rule'));
-    break;
-  case 'list':   cmdList();         break;
-  case 'test':   await cmdTest();   break;
-  case 'remove': await cmdRemove(); break;
-  case 'deploy':
-    console.log(chalk.yellow('\n  Deploy support coming in v2. For now: npm run dev\n'));
-    break;
-  default:
-    banner();
-    console.log('  Usage:\n');
-    console.log(chalk.cyan('    trex init [name]') + chalk.gray('     Scaffold a new bot project'));
-    console.log(chalk.cyan('    trex dev') + chalk.gray('             Start bot in dev mode'));
-    console.log(chalk.cyan('    trex add rule') + chalk.gray('        Add a rule interactively'));
-    console.log(chalk.cyan('    trex list') + chalk.gray('            List all rules'));
-    console.log(chalk.cyan('    trex test') + chalk.gray('            Dry-run a rule against input'));
-    console.log(chalk.cyan('    trex remove') + chalk.gray('          Remove a rule'));
-    console.log();
+\`\`\`bash
+npm run dev       # Development (hot reload)
+npm run start     # Production
+\`\`\`
+`;
 }
